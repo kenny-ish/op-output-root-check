@@ -149,7 +149,7 @@ def fetch_output_root(l2_rpc, block_number, rpc=rpc_call):
     }
 
 
-def find_block_by_timestamp(l2_rpc, timestamp, rpc=rpc_call, max_steps=40):
+def find_block_by_timestamp(l2_rpc, timestamp, rpc=rpc_call, max_steps=64):
     """Find the L2 block whose header timestamp equals `timestamp` exactly."""
     latest = rpc(l2_rpc, "eth_getBlockByNumber", ["latest", False])
     latest_num = int(latest["number"], 16)
@@ -158,21 +158,35 @@ def find_block_by_timestamp(l2_rpc, timestamp, rpc=rpc_call, max_steps=40):
         raise RuntimeError("timestamp %d is after the latest L2 block (%d)" % (timestamp, latest_ts))
     if timestamp == latest_ts:
         return latest
-    block_time = 2
-    guess = max(0, latest_num - (latest_ts - timestamp) // block_time)
-    for _ in range(max_steps):
+    # Keep a bracket lo < target < hi (lo == -1 while nothing below the target is
+    # known yet). Guess by interpolating the block time inside the bracket; when a
+    # guess does not at least halve the bracket, bisect it instead, so a stretch of
+    # irregular block times (a sequencer gap, say) cannot stall the search.
+    lo, lo_ts = -1, None
+    hi, hi_ts = latest_num, latest_ts
+    block_time = 2.0
+    bisect = False
+    while hi - lo > 1 and max_steps > 0:
+        max_steps -= 1
+        if bisect:
+            guess = (lo + hi) // 2
+        else:
+            guess = hi - int((hi_ts - timestamp) / block_time)
+            guess = min(max(guess, lo + 1), hi - 1)
         block = rpc(l2_rpc, "eth_getBlockByNumber", [hex(guess), False])
         ts = int(block["timestamp"], 16)
         if ts == timestamp:
             return block
-        if guess != latest_num and ts != latest_ts:
-            est = (latest_ts - ts) / (latest_num - guess)
-            if est > 0:
-                block_time = est
-        step = int((ts - timestamp) / block_time)
-        if step == 0:
-            step = 1 if ts > timestamp else -1
-        guess = max(0, guess - step)
+        width = hi - lo
+        if ts < timestamp:
+            lo, lo_ts = guess, ts
+            est = (hi_ts - lo_ts) / (hi - lo)
+        else:
+            est = (hi_ts - ts) / (hi - guess)
+            hi, hi_ts = guess, ts
+        if est > 0:
+            block_time = est
+        bisect = 2 * (hi - lo) > width
     raise RuntimeError("no L2 block with timestamp %d found" % timestamp)
 
 

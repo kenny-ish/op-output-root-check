@@ -176,6 +176,27 @@ class GameTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             m.find_block_by_timestamp(L2, 1791623285 + 10, rpc=fake_rpc)
 
+    def test_find_block_by_timestamp_across_a_sequencer_gap(self):
+        # 2-second blocks with a day-long gap 5000 blocks before the head, as after a
+        # sequencer outage. Blocks before the gap must still be found, and the search
+        # must stay within the chain (never ask for a block after the head).
+        head, gap_at = 158_000_000, 158_000_000 - 5000
+
+        def timestamp_of(number):
+            return 1_700_000_000 + 2 * number + (86400 if number > gap_at else 0)
+
+        def gap_rpc(url, method, params):
+            self.assertEqual(method, "eth_getBlockByNumber")
+            number = head if params[0] == "latest" else int(params[0], 16)
+            self.assertLessEqual(number, head)
+            return {"number": hex(number), "timestamp": hex(timestamp_of(number))}
+
+        for target in (gap_at - 1000, gap_at - 1, gap_at, gap_at + 1, head - 1, 0):
+            block = m.find_block_by_timestamp(L2, timestamp_of(target), rpc=gap_rpc)
+            self.assertEqual(int(block["number"], 16), target)
+        with self.assertRaises(RuntimeError):
+            m.find_block_by_timestamp(L2, timestamp_of(100) + 1, rpc=gap_rpc)
+
     def test_verify_game_matches_l1_claim(self):
         res = m.verify_game(L1, L2, GAME, rpc=fake_rpc)
         self.assertTrue(res["match"])
